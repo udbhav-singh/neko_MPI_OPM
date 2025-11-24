@@ -1,0 +1,11 @@
+comm/comm_nccl.lo: comm/comm_nccl.c /usr/include/stdc-predef.h \
+ comm/comm_nccl.h comm/comm.h \
+ /usr/lib/x86_64-linux-gnu/openmpi/include/mpi.h \
+ /usr/lib/gcc/x86_64-linux-gnu/13/include/stddef.h \
+ /usr/lib/x86_64-linux-gnu/openmpi/include/mpi_portable_platform.h
+/usr/include/stdc-predef.h:
+comm/comm_nccl.h:
+comm/comm.h:
+/usr/lib/x86_64-linux-gnu/openmpi/include/mpi.h:
+/usr/lib/gcc/x86_64-linux-gnu/13/include/stddef.h:
+/usr/lib/x86_64-linux-gnu/openmpi/include/mpi_portable_platform.h:

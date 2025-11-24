@@ -1,0 +1,236 @@
+diff --git a/examples/tgv/tgv.case b/examples/tgv/tgv.case
+index 130564d6..e07515c5 100644
+--- a/examples/tgv/tgv.case
++++ b/examples/tgv/tgv.case
+@@ -9,7 +9,7 @@
+         "load_balance": false,
+         "job_timelimit": "00:00:00",
+         "time": {
+-            "end_time": 3.0,
++            "end_time": 50.0,
+             "timestep": 1e-2
+         },
+         "numerics": {
+diff --git a/src/common/projection.f90 b/src/common/projection.f90
+index 63f90ba9..436b78e8 100644
+--- a/src/common/projection.f90
++++ b/src/common/projection.f90
+@@ -576,6 +576,7 @@ contains
+ 
+ 
+   subroutine cpu_proj_ortho(this, xx, bb, w, n)
++    use omp_lib
+     type(projection_t), intent(inout) :: this
+     integer, intent(in) :: n
+     real(kind=rp), dimension(n, this%L), intent(inout) :: xx, bb
+@@ -588,100 +589,111 @@ contains
+ 
+       if (m .le. 0) return !No vectors to ortho-normalize
+ 
+-      ! AX = B
+-      ! Calculate dx, db: dx = x-XX^Tb, db=b-BX^Tb
+       call rzero(alpha, m)
++
++      ! ===== First projection =====
++      !$omp parallel do private(j,k,l,s,c) num_threads(4) reduction(+:alpha)
+       do i = 1, n, NEKO_BLK_SIZE
+          j = min(NEKO_BLK_SIZE, n-i+1)
+-         do k = 1, m !First round CGS
++         do k = 1, m
+             s = 0.0_rp
+             c = 0.0_rp
+-            do l = 0, (j-1)
++            do l = 0, j-1
+                s = s + xx(i+l,k) * w(i+l) * bb(i+l,m)
+                c = c + bb(i+l,k) * w(i+l) * xx(i+l,m)
+             end do
+             alpha(k) = alpha(k) + 0.5_rp * (s + c)
+          end do
+       end do
++      !$omp end parallel do
+ 
+       call MPI_Allreduce(MPI_IN_PLACE, alpha, this%m, &
+            MPI_REAL_PRECISION, MPI_SUM, NEKO_COMM, ierr)
+ 
+-      nrm = sqrt(alpha(m)) !Calculate A-norm of new vector
+-
++      nrm = sqrt(alpha(m))
+ 
++      ! ===== Orthogonalization step =====
++      !$omp parallel do private(j,k,l) num_threads(1)
+       do i = 1, n, NEKO_BLK_SIZE
+          j = min(NEKO_BLK_SIZE, n-i+1)
+          do k = 1, m-1
+-            do l = 0, (j-1)
++            do l = 0, j-1
+                xx(i+l,m) = xx(i+l,m) - alpha(k) * xx(i+l,k)
+                bb(i+l,m) = bb(i+l,m) - alpha(k) * bb(i+l,k)
+             end do
+          end do
+       end do
+-      call rzero(beta,m)
++      !$omp end parallel do
+ 
++      call rzero(beta, m)
++
++      ! ===== Second projection =====
++      !$omp parallel do private(j,k,l,s,c) num_threads(1) reduction(+:beta)
+       do i = 1, n, NEKO_BLK_SIZE
+          j = min(NEKO_BLK_SIZE, n-i+1)
+          do k = 1, m-1
+             s = 0.0_rp
+             c = 0.0_rp
+-            do l = 0, (j-1)
++            do l = 0, j-1
+                s = s + xx(i+l,k) * w(i+l) * bb(i+l,m)
+                c = c + bb(i+l,k) * w(i+l) * xx(i+l,m)
+             end do
+             beta(k) = beta(k) + 0.5_rp * (s + c)
+          end do
+       end do
++      !$omp end parallel do
+ 
+       call MPI_Allreduce(MPI_IN_PLACE, beta, this%m-1, &
+            MPI_REAL_PRECISION, MPI_SUM, NEKO_COMM, ierr)
+ 
+       alpha(m) = 0.0_rp
+ 
++      ! ===== Apply correction =====
++      !$omp parallel do private(j,k,l,s) num_threads(1) reduction(+:alpha)
+       do i = 1, n, NEKO_BLK_SIZE
+          j = min(NEKO_BLK_SIZE,n-i+1)
+          do k = 1, m-1
+-            do l = 0, (j-1)
++            do l = 0, j-1
+                xx(i+l,m) = xx(i+l,m) - beta(k) * xx(i+l,k)
+                bb(i+l,m) = bb(i+l,m) - beta(k) * bb(i+l,k)
+             end do
+          end do
+          s = 0.0_rp
+-         do l = 0, (j-1)
++         do l = 0, j-1
+             s = s + xx(i+l,m) * w(i+l) * bb(i+l,m)
+          end do
+          alpha(m) = alpha(m) + s
+       end do
++      !$omp end parallel do
++
+       do k = 1, m-1
+          alpha(k) = alpha(k) + beta(k)
+       end do
+ 
+-      !alpha(m) = glsc3(xx(1,m), w, bb(1,m), n)
+       call MPI_Allreduce(MPI_IN_PLACE, alpha(m), 1, &
+            MPI_REAL_PRECISION, MPI_SUM, NEKO_COMM, ierr)
+       alpha(m) = sqrt(alpha(m))
+-      !dx and db now stored in last column of xx and bb
+ 
+-      if (alpha(m) .gt. this%tol*nrm) then !New vector is linearly independent
+-         !Normalize dx and db
++      ! ===== Normalize if independent =====
++      if (alpha(m) .gt. this%tol*nrm) then
+          scl1 = 1.0_rp / alpha(m)
+-         do i = 0, (n - 1)
++         !$omp parallel do num_threads(4)
++         do i = 0, n-1
+             xx(1+i,m) = scl1 * xx(1+i,m)
+             bb(1+i,m) = scl1 * bb(1+i,m)
+          end do
+-
+-      else !New vector is not linearly independent, forget about it
+-         k = m !location of rank deficient column
++         !$omp end parallel do
++      else
++         k = m
+          if (pe_rank .eq. 0) then
+             call neko_warning('New vector not linearly indepependent!')
+          end if
+-         m = m - 1 !Remove column
++         m = m - 1
+       end if
+ 
+     end associate
++end subroutine cpu_proj_ortho
+ 
+-  end subroutine cpu_proj_ortho
+ 
+   subroutine print_proj_info(this, string, tstep)
+     class(projection_t), intent(in) :: this
+diff --git a/src/math/bcknd/cpu/tensor_cpu.f90 b/src/math/bcknd/cpu/tensor_cpu.f90
+index 0160cc75..60d51ea7 100644
+--- a/src/math/bcknd/cpu/tensor_cpu.f90
++++ b/src/math/bcknd/cpu/tensor_cpu.f90
+@@ -894,7 +894,7 @@ contains
+     integer, intent(in) :: nv, nu, nelv
+     real(kind=rp), intent(inout) :: v(nv*nv*nv,nelv)
+     real(kind=rp), intent(in) :: u(nu*nu*nu,nelv)
+-    real(kind=rp), intent(in) :: A(nv,nu), Bt(nu, nv), Ct(nu,nv)
++    real(kind=rp), intent(in) :: A(nv,nu), Bt(nu,nv), Ct(nu,nv)
+     real(kind=rp) :: work(nu**2*nv), work2(nu*nv**2), tmp
+     integer :: ie, i, j, k, l, ii, jj
+     integer :: nunu, nvnu, nvnv
+@@ -903,25 +903,30 @@ contains
+     nunu = nu * nu
+     nvnv = nv * nv
+ 
+-    do ie = 1,nelv
++    do ie = 1, nelv
++
++       
++       !$omp parallel do collapse(2) private(i,j,k,tmp,ii) schedule(static) num_threads(4)
+        do j = 1, nunu
+           do i = 1, nv
+              ii = i + nv * (j - 1)
+              tmp = 0.0_rp
+              do k = 1, nu
+-                tmp = tmp + A(i,k) * u(k + nu * (j - 1), ie)
++                tmp = tmp + A(i,k) * u(k + nu*(j-1), ie)
+              end do
+              work(ii) = tmp
+           end do
+        end do
+ 
++      
++       !$omp parallel do collapse(3) private(i,j,l,k,tmp,ii,jj) schedule(static) num_threads(4)
+        do i = 1, nu
+           do j = 1, nv
+              do l = 1, nv
+-                ii = l + nv * (j - 1) + nvnv * (i - 1)
++                ii = l + nv*(j-1) + nvnv*(i-1)
+                 tmp = 0.0_rp
+                 do k = 1, nu
+-                   jj = l + nv * (k - 1) + nvnu * (i - 1)
++                   jj = l + nv*(k-1) + nvnu*(i-1)
+                    tmp = tmp + work(jj) * Bt(k,j)
+                 end do
+                 work2(ii) = tmp
+@@ -929,20 +934,25 @@ contains
+           end do
+        end do
+ 
++     
++       !$omp parallel do collapse(2) private(i,j,k,tmp,ii,jj) schedule(static) num_threads(4)
+        do j = 1, nv
+           do i = 1, nvnv
+-             jj = i + nvnv * (j - 1)
++             jj = i + nvnv*(j-1)
+              tmp = 0.0_rp
+              do k = 1, nu
+-                ii = i + nvnv * (k - 1)
+-                tmp = tmp + work2(ii) * Ct(k, j)
++                ii = i + nvnv*(k-1)
++                tmp = tmp + work2(ii) * Ct(k,j)
+              end do
+              v(jj, ie) = tmp
+           end do
+        end do
++
+     end do
+ 
+-  end subroutine tnsr3d_nvnu_cpu
++end subroutine tnsr3d_nvnu_cpu
++
++
+ 
+   subroutine tnsr3d_nu2nv4_cpu(v, u, A, Bt, Ct, nelv)
+     integer, parameter :: nu = 2

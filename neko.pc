@@ -1,0 +1,17 @@
+prefix=/home/udbhav/neko_install
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+includedir_pkg=${prefix}/include/neko
+compiler=mpif90
+
+# A couple of custom variables to communicate with consumers of the package
+precision=dp
+backend=CPU
+
+Name: NEKO
+Version: 1.0.0-rc2
+Description:
+Requires:
+Libs: -L${libdir} -lneko  -L/home/udbhav/json-fortran_install/lib -ljsonfortran   -llapack -lblas   
+Cflags:  -I/home/udbhav/json-fortran_install/include  -I${includedir} -I${includedir_pkg}
